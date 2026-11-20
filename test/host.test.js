@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, writeFile, symlink, rename, rm, chmod, realpath, opendi
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
+import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { apply, createHandlers } from '../src/index.js'
@@ -213,6 +214,54 @@ test('listing does not wait for or depend on editor discovery; opening still che
   const open = await call(handlers, 'open', { sessionId: 'session-here' })
   assert.deepEqual(open, { status: 503, body: { code: 'vscode-unavailable' } })
   assert.equal(lookups, 1)
+})
+
+test('slow post-menu discovery still returns a real root file after the native menu deadline', async t => {
+  const { root, registry } = await fixture(t)
+  await writeFile(path.join(root, 'T00.code-workspace'), '{}')
+  const handlers = createHandlers({
+    registry, env: {},
+    discoverFiles: async (...args) => {
+      // Model a busy filesystem at the first scan operation. This exceeds
+      // both 0.1.1's Host deadline and DSH's native menu deadline.
+      await delay(1100)
+      return discover(...args)
+    },
+  })
+  const result = await call(handlers, 'list', { sessionId: 'session-here' })
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body.files.map(file => file.label), ['T00.code-workspace'])
+  assert.equal(result.body.truncated, false)
+})
+
+test('a dismissed menu scan cannot overwrite a newer listing in the same session', async t => {
+  const { root, registry } = await fixture(t)
+  await writeFile(path.join(root, 'T00.code-workspace'), '{}')
+  let finishFirst
+  let beginFirst
+  const blocked = new Promise(resolve => { finishFirst = resolve })
+  const started = new Promise(resolve => { beginFirst = resolve })
+  let scans = 0
+  const handlers = createHandlers({
+    registry, env: {}, resolveEditor: async () => '/trusted/code', launch: async () => {},
+    discoverFiles: async (...args) => {
+      if (++scans === 1) {
+        beginFirst()
+        await blocked
+      }
+      return discover(...args)
+    },
+  })
+  const controller = new AbortController()
+  const initial = handlers.list(new Request(fn('list', { sessionId: 'session-here' }), { signal: controller.signal }))
+  await started
+  controller.abort()
+  const latest = await call(handlers, 'list', { sessionId: 'session-here' })
+  assert.equal(latest.status, 200)
+  finishFirst()
+  assert.equal((await initial).status, 409)
+  const open = await call(handlers, 'open', { sessionId: 'session-here', fileId: latest.body.files[0].id })
+  assert.deepEqual(open, { status: 200, body: { opened: true } })
 })
 
 test('native schema defaults to depth 2 and only accepts whole depths 0–8', async () => {

@@ -18,9 +18,9 @@ const routes = { list: '/api/vscode-workspace/list', open: '/api/vscode-workspac
 const maxBody = 1024
 const fileLifetime = 120_000
 const maxListings = 16
-// rc.5 discards async menu contributions after 1000ms. Finish the bounded
-// disk scan earlier so the browser can display the safe partial results.
-const scanTimeMs = 600
+// The native menu renders before scanning. Give slow disks a bounded window
+// to reach root-level files, without making the menu wait for file I/O.
+const scanTimeMs = 3000
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/
 const tokenPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 
@@ -75,7 +75,7 @@ function trustedLaunchEnv(ctx) {
   return result
 }
 
-export function createHandlers({ registry, env, now = Date.now, getSearchDepth = () => defaultSearchDepth, resolveEditor = resolveVSCode, launch = launchVSCode }) {
+export function createHandlers({ registry, env, now = Date.now, getSearchDepth = () => defaultSearchDepth, discoverFiles = discover, resolveEditor = resolveVSCode, launch = launchVSCode }) {
   let inFlight = 0
   const listings = new Map()
   function prune() {
@@ -95,9 +95,12 @@ export function createHandlers({ registry, env, now = Date.now, getSearchDepth =
       if (!root) return failure(404, 'workspace-unavailable')
       prune()
       if (kind === 'list') {
+        if (request.signal.aborted) return failure(409, 'scan-cancelled')
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(scanTimeMs)])
-        const { files, truncated } = await discover(root.canonical, signal, { ...discoveryLimits, depth: searchDepthOf(getSearchDepth()) })
+        const { files, truncated } = await discoverFiles(root.canonical, signal, { ...discoveryLimits, depth: searchDepthOf(getSearchDepth()) })
+        if (request.signal.aborted) return failure(409, 'scan-cancelled')
         const after = await registeredRoot(registry, sessionId)
+        if (request.signal.aborted) return failure(409, 'scan-cancelled')
         if (!matchesIdentity(root, after) || root.id !== after?.id) return failure(409, 'workspace-unavailable')
         const tokens = new Map()
         const publicFiles = files.map(file => {

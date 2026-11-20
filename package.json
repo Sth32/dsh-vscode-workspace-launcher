@@ -1,6 +1,6 @@
 {
   "name": "dsh-vscode-workspace-launcher",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Open VS Code workspace files from the DeepSeek Harness session menu.",
   "license": "MIT",
   "type": "module",

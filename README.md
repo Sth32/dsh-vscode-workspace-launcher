@@ -17,7 +17,7 @@ dsh plugin --profile web add github:Sth32/dsh-vscode-workspace-launcher
 如需从本地包安装，先在源码目录执行 `npm pack`，再运行：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.1.tgz
+dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.2.tgz
 ```
 
 重启对应 DSH 配置。如果使用其他 DSH profile，把命令里的 `web` 换成对应名称。已在 Linux 的 DSH Web 0.2.2-rc.5 + VS Code 1.147.0 验证安装、真实菜单、搜索深度保存和两种打开路径：「打开当前工作区文件夹」打开已注册目录；点文件后，VS Code Explorer 显示该文件配置的工作区根。Linux/macOS 会从可信的宿主安装目录或启动时原有 PATH 查找 `code`；Windows 查找常规安装目录或 PATH 上的 `Code.exe`（不经 shell 执行 `code.cmd`）。
@@ -25,6 +25,11 @@ dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.1.
 ## 范围
 
 只扫描当前会话关联的已注册目录，从根目录逐层扫描至配置深度，最多 4,000 个条目或 100 个结果；跳过 Git、node_modules 及符号链接。扫描被截断时菜单会提示。不会读取工作区文件内容或改变 DSH 工作区、权限、会话、首选编辑器；VS Code 自行处理工作区文件内容和 Workspace Trust。宿主必须在本机运行，并由 DSH 的所有者连接授权；不支持 SSH 模式或远程浏览器访问。请只打开可信的工作区文件。
+
+## 0.1.2
+
+- 菜单立即可用，扫描期间显示「正在扫描…」；结果就绪后在同一个子菜单更新，无需关闭再打开。
+- 已取消的扫描不会覆盖新菜单的结果。
 
 ## 0.1.1
 
