@@ -1,0 +1,3 @@
+- insert:
+    - id: vscode-workspace-launcher
+      name: dsh-vscode-workspace-launcher
