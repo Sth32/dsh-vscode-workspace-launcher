@@ -50,42 +50,50 @@ export async function discover(root, signal, limits = discoveryLimits) {
   let entries = 0
   let truncated = false
   const files = []
-  async function walk(parts) {
+  // Finish the root, then its immediate children, before visiting any
+  // deeper directory. A large early subtree must not spend the shared budget
+  // before a later shallow workspace file has even been considered.
+  const queue = [[]]
+  scan: for (let i = 0; i < queue.length; i++) {
     if (signal?.aborted || entries >= limits.entries || files.length >= limits.files) {
       truncated = true
-      return
+      break
     }
+    const parts = queue[i]
     const dir = path.join(root, ...parts)
-    // Dirent type is a hint, not authority. A replaced symlink must not make
-    // us enumerate an external directory. Recheck immediately before opendir.
     let handle
     try {
+      // Dirent types are hints. Recheck the path and canonical containment
+      // when dequeuing; a queued path may have been replaced in the meantime.
       const item = await identify(dir, 'directory')
-      if (!item || !inside(root, item.canonical) || item.canonical !== dir) return
+      if (!item || !inside(root, item.canonical) || item.canonical !== dir) {
+        truncated = true
+        continue
+      }
       handle = await opendir(dir)
     } catch {
       truncated = true
-      return
+      continue
     }
     try {
       for await (const entry of handle) {
         if (signal?.aborted || ++entries > limits.entries || files.length >= limits.files) {
           truncated = true
-          break
+          break scan
         }
         if (entry.isSymbolicLink() || excluded.has(entry.name.toLowerCase())) continue
         const next = [...parts, entry.name]
         if (entry.isDirectory()) {
-          if (parts.length >= limits.depth) truncated = true
-          else await walk(next)
+          // Preference depth defines scope, not an incomplete scan.
+          if (parts.length < limits.depth) queue.push(next)
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(suffix)) {
           const identity = await identifyWorkspaceFile(root, next)
           if (identity) files.push({ parts: next, label: next.join('/'), identity })
+          else truncated = true
         }
       }
     } catch { truncated = true }
   }
-  await walk([])
   files.sort((a, b) => a.label.localeCompare(b.label))
   return { files, truncated }
 }

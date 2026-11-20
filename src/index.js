@@ -1,13 +1,26 @@
 import { randomUUID } from 'node:crypto'
-import { discover, matchesIdentity, registeredRoot, verifyFile } from './workspaces.js'
+import Schema from '@deepseek-ai/schemastery'
+import { discover, discoveryLimits, matchesIdentity, registeredRoot, verifyFile } from './workspaces.js'
 import { launchVSCode, resolveVSCode } from './vscode.js'
 
 export const name = 'vscode-workspace-launcher'
 export const inject = ['connection', 'workspaceRegistry']
+const defaultSearchDepth = 2
+export const Config = Schema.object({
+  searchDepth: Schema.number().step(1).min(0).max(discoveryLimits.depth)
+    .default(defaultSearchDepth).description('Search depth (0 = registered workspace root)').volatile(),
+})
+
+function searchDepthOf(value) {
+  return Number.isInteger(value) && value >= 0 && value <= discoveryLimits.depth ? value : defaultSearchDepth
+}
 const routes = { list: '/api/vscode-workspace/list', open: '/api/vscode-workspace/open' }
 const maxBody = 1024
 const fileLifetime = 120_000
 const maxListings = 16
+// rc.5 discards async menu contributions after 1000ms. Finish the bounded
+// disk scan earlier so the browser can display the safe partial results.
+const scanTimeMs = 600
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/
 const tokenPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
 
@@ -62,7 +75,7 @@ function trustedLaunchEnv(ctx) {
   return result
 }
 
-export function createHandlers({ registry, env, now = Date.now, resolveEditor = resolveVSCode, launch = launchVSCode }) {
+export function createHandlers({ registry, env, now = Date.now, getSearchDepth = () => defaultSearchDepth, resolveEditor = resolveVSCode, launch = launchVSCode }) {
   let inFlight = 0
   const listings = new Map()
   function prune() {
@@ -80,12 +93,10 @@ export function createHandlers({ registry, env, now = Date.now, resolveEditor = 
       const { sessionId, fileId } = body
       const root = await registeredRoot(registry, sessionId)
       if (!root) return failure(404, 'workspace-unavailable')
-      const editor = await resolveEditor(root.canonical, env)
-      if (!editor) return failure(503, 'vscode-unavailable')
       prune()
       if (kind === 'list') {
-        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(1_500)])
-        const { files, truncated } = await discover(root.canonical, signal)
+        const signal = AbortSignal.any([request.signal, AbortSignal.timeout(scanTimeMs)])
+        const { files, truncated } = await discover(root.canonical, signal, { ...discoveryLimits, depth: searchDepthOf(getSearchDepth()) })
         const after = await registeredRoot(registry, sessionId)
         if (!matchesIdentity(root, after) || root.id !== after?.id) return failure(409, 'workspace-unavailable')
         const tokens = new Map()
@@ -100,6 +111,8 @@ export function createHandlers({ registry, env, now = Date.now, resolveEditor = 
         listings.set(sessionId, { root, tokens, expires: now() + fileLifetime })
         return result(200, { files: publicFiles, truncated, expiresInMs: fileLifetime })
       }
+      const editor = await resolveEditor(root.canonical, env)
+      if (!editor) return failure(503, 'vscode-unavailable')
       let target = root.canonical
       if (fileId) {
         const listing = listings.get(sessionId)
@@ -122,8 +135,14 @@ export function createHandlers({ registry, env, now = Date.now, resolveEditor = 
   return { list: handle('list'), open: handle('open') }
 }
 
-export function apply(ctx) {
-  const handlers = createHandlers({ registry: ctx.workspaceRegistry, env: trustedLaunchEnv(ctx) })
+export function apply(ctx, config) {
+  ctx.inject?.(['settings'], child => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+  })
+  const handlers = createHandlers({
+    registry: ctx.workspaceRegistry, env: trustedLaunchEnv(ctx),
+    getSearchDepth: () => config?.searchDepth?.get?.(),
+  })
   for (const [kind, path] of Object.entries(routes)) {
     ctx.effect(() => ctx.connection.fetch.register({
       path, methods: ['POST'], requestBody: 'buffered', fetch: handlers[kind],

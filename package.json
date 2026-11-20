@@ -1,18 +1,19 @@
 {
   "name": "dsh-vscode-workspace-launcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Open VS Code workspace files from the DeepSeek Harness session menu.",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.js",
   "exports": { ".": "./src/index.js", "./client": "./src/client.js", "./package.json": "./package.json" },
   "engines": { "node": ">=24.9.0", "dsh": ">=0.2.2-rc.5 <=0.2.2" },
+  "dependencies": { "@deepseek-ai/schemastery": "3.19.0" },
   "files": ["src", "dsh.plugin.json", "cordis.patch.yml", "README.md", "LICENSE"],
   "scripts": { "test": "node --test test/*.test.js" },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
-      "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-context-menu"],
+      "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-context-menu"],
       "platform": "web"
     }
   }

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, symlink, rename, rm, chmod, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, symlink, rename, rm, chmod, realpath, opendir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -137,4 +137,103 @@ test('mounts only exact POST owner Connection routes through lifecycle', () => {
     { path: '/api/vscode-workspace/list', methods: ['POST'], requestBody: 'buffered' },
     { path: '/api/vscode-workspace/open', methods: ['POST'], requestBody: 'buffered' },
   ])
+})
+
+test('shallow workspace files survive discovery budget consumed by an earlier deep subtree', async t => {
+  const { root } = await fixture(t)
+  for (const folder of ['branch-a', 'branch-b']) await mkdir(path.join(root, folder))
+  await writeFile(path.join(root, 'root.code-workspace'), '{}')
+  // Directory enumeration order is filesystem-dependent. Make the actual first
+  // directory noisy while putting both first-depth examples in the later one.
+  const folders = []
+  for await (const item of await opendir(root)) if (item.isDirectory()) folders.push(item.name)
+  const [first, second] = folders
+  assert.ok(first && second)
+  const noise = path.join(root, first, 'deep')
+  await mkdir(noise)
+  for (let i = 0; i < 12; i++) await writeFile(path.join(noise, 'plain-' + i), '')
+  for (const name of ['first.code-workspace', 'second.code-workspace']) {
+    await writeFile(path.join(root, second, name), '{}')
+  }
+  const result = await discover(root, undefined, { entries: 9, depth: 8, files: 100 })
+  assert.deepEqual(result.files.map(file => file.label), [
+    second + '/first.code-workspace', second + '/second.code-workspace', 'root.code-workspace',
+  ])
+  assert.equal(result.truncated, true)
+})
+
+test('one unreadable directory marks discovery incomplete without hiding readable workspace files', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async t => {
+  const { root } = await fixture(t)
+  const locked = path.join(root, 'locked')
+  await mkdir(locked)
+  await writeFile(path.join(locked, 'unreadable.code-workspace'), '{}')
+  await writeFile(path.join(root, 'readable.code-workspace'), '{}')
+  try {
+    await chmod(locked, 0)
+    const result = await discover(root)
+    assert.equal(result.truncated, true)
+    assert.deepEqual(result.files.map(file => file.label), ['readable.code-workspace'])
+  } finally { await chmod(locked, 0o700) }
+})
+
+test('registered workspace determines discovery regardless of distinct adjacent workspace and rejected cwd field', async t => {
+  const { root, outside, registry, handlers } = await fixture(t)
+  registry.values.push({ id: 'outside-id', path: outside, sessionIds: ['session-outside'] })
+  await writeFile(path.join(root, 'inside.code-workspace'), '{}')
+  await writeFile(path.join(outside, 'outside.code-workspace'), '{}')
+  assert.equal((await call(handlers, 'list', { sessionId: 'session-here', cwd: outside })).status, 400)
+  for (const [sessionId, label] of [['session-here', 'inside.code-workspace'], ['session-outside', 'outside.code-workspace']]) {
+    const result = await call(handlers, 'list', { sessionId })
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body.files.map(file => file.label), [label])
+  }
+})
+
+test('a queued workspace symlink or Windows junction cannot introduce outside files', async t => {
+  const { root, outside, handlers } = await fixture(t)
+  await writeFile(path.join(outside, 'outside.code-workspace'), '{}')
+  await symlink(outside, path.join(root, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir')
+  const result = await call(handlers, 'list', { sessionId: 'session-here' })
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body.files, [])
+  assert.equal(result.body.truncated, false)
+})
+
+test('listing does not wait for or depend on editor discovery; opening still checks availability', async t => {
+  const { root, registry } = await fixture(t)
+  await writeFile(path.join(root, 'readable.code-workspace'), '{}')
+  let lookups = 0
+  const handlers = createHandlers({ registry, env: {}, resolveEditor: async () => { ++lookups } })
+  const list = await call(handlers, 'list', { sessionId: 'session-here' })
+  assert.equal(list.status, 200)
+  assert.equal(list.body.files[0].label, 'readable.code-workspace')
+  assert.equal(lookups, 0)
+  const open = await call(handlers, 'open', { sessionId: 'session-here' })
+  assert.deepEqual(open, { status: 503, body: { code: 'vscode-unavailable' } })
+  assert.equal(lookups, 1)
+})
+
+test('native schema defaults to depth 2 and only accepts whole depths 0–8', async () => {
+  const { Config } = await import('../src/index.js')
+  assert.equal(Config({}).searchDepth.get(), 2)
+  for (const n of [0, 2, 8]) assert.equal(Config({ searchDepth: n }).searchDepth.get(), n)
+  for (const n of [-1, 1.25, 9, '2']) assert.throws(() => Config({ searchDepth: n }))
+})
+
+test('configured depth is live, root is 0, and intentionally deeper files do not mark results incomplete', async t => {
+  const { root, registry } = await fixture(t)
+  await mkdir(path.join(root, 'one', 'two', 'three'), { recursive: true })
+  const labels = ['root.code-workspace','one/one.code-workspace',
+    'one/two/two.code-workspace','one/two/three/three.code-workspace']
+  for (const label of labels) await writeFile(path.join(root, label), '{}')
+  let depth
+  const handlers = createHandlers({ registry, env: {}, getSearchDepth: () => depth })
+  for (const [setting, expected] of [[undefined, 3], [0, 1], [1, 2], [2, 3], [3, 4], [8, 4], [99, 3]]) {
+    depth = setting
+    const found = (await call(handlers, 'list', { sessionId: 'session-here' })).body
+    assert.equal(found.truncated, false)
+    assert.deepEqual(found.files.map(file => file.label).sort(), labels.slice(0, expected).sort())
+  }
 })
