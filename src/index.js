@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
-import { discover, discoveryLimits, matchesIdentity, registeredRoot, verifyFile } from './workspaces.js'
+import { discover, discoveryLimits, matchesIdentity, sessionRoot, verifyFile } from './workspaces.js'
 import { launchVSCode, resolveVSCode } from './vscode.js'
 
 export const name = 'vscode-workspace-launcher'
-export const inject = ['connection', 'workspaceRegistry']
+export const inject = ['connection', 'sessions']
 const defaultSearchDepth = 2
 export const Config = Schema.object({
   searchDepth: Schema.number().step(1).min(0).max(discoveryLimits.depth)
-    .default(defaultSearchDepth).description('Search depth (0 = registered workspace root)').volatile(),
+    .default(defaultSearchDepth).description('Search depth (0 = session working directory)').volatile(),
 })
 
 function searchDepthOf(value) {
@@ -75,7 +75,7 @@ function trustedLaunchEnv(ctx) {
   return result
 }
 
-export function createHandlers({ registry, env, now = Date.now, getSearchDepth = () => defaultSearchDepth, discoverFiles = discover, resolveEditor = resolveVSCode, launch = launchVSCode }) {
+export function createHandlers({ resolveRoot, env, now = Date.now, getSearchDepth = () => defaultSearchDepth, discoverFiles = discover, resolveEditor = resolveVSCode, launch = launchVSCode }) {
   let inFlight = 0
   const listings = new Map()
   function prune() {
@@ -91,7 +91,7 @@ export function createHandlers({ registry, env, now = Date.now, getSearchDepth =
       const body = await parse(request, kind)
       if (!body) return failure(400, 'invalid-request')
       const { sessionId, fileId } = body
-      const root = await registeredRoot(registry, sessionId)
+      const root = await resolveRoot(sessionId)
       if (!root) return failure(404, 'workspace-unavailable')
       prune()
       if (kind === 'list') {
@@ -99,9 +99,9 @@ export function createHandlers({ registry, env, now = Date.now, getSearchDepth =
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(scanTimeMs)])
         const { files, truncated } = await discoverFiles(root.canonical, signal, { ...discoveryLimits, depth: searchDepthOf(getSearchDepth()) })
         if (request.signal.aborted) return failure(409, 'scan-cancelled')
-        const after = await registeredRoot(registry, sessionId)
+        const after = await resolveRoot(sessionId)
         if (request.signal.aborted) return failure(409, 'scan-cancelled')
-        if (!matchesIdentity(root, after) || root.id !== after?.id) return failure(409, 'workspace-unavailable')
+        if (!matchesIdentity(root, after)) return failure(409, 'workspace-unavailable')
         const tokens = new Map()
         const publicFiles = files.map(file => {
           const id = randomUUID()
@@ -120,14 +120,14 @@ export function createHandlers({ registry, env, now = Date.now, getSearchDepth =
       if (fileId) {
         const listing = listings.get(sessionId)
         const file = listing?.tokens.get(fileId)
-        if (!file || listing.root.id !== root.id || !matchesIdentity(listing.root, root)) {
+        if (!file || !matchesIdentity(listing.root, root)) {
           return failure(409, 'file-unavailable')
         }
         target = await verifyFile(root.canonical, file)
         if (!target) return failure(409, 'file-unavailable')
       }
-      const after = await registeredRoot(registry, sessionId)
-      if (!matchesIdentity(root, after) || root.id !== after?.id) return failure(409, 'workspace-unavailable')
+      const after = await resolveRoot(sessionId)
+      if (!matchesIdentity(root, after)) return failure(409, 'workspace-unavailable')
       if (request.signal.aborted) return failure(409, 'launch-failed')
       try { await launch(editor, target, env) }
       catch { return failure(502, 'launch-failed') }
@@ -143,7 +143,7 @@ export function apply(ctx, config) {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
   const handlers = createHandlers({
-    registry: ctx.workspaceRegistry, env: trustedLaunchEnv(ctx),
+    resolveRoot: sessionId => sessionRoot(ctx, sessionId), env: trustedLaunchEnv(ctx),
     getSearchDepth: () => config?.searchDepth?.get?.(),
   })
   for (const [kind, path] of Object.entries(routes)) {

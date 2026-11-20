@@ -20,15 +20,17 @@ export function matchesIdentity(a, b) {
   return !!a && !!b && a.canonical === b.canonical && a.device === b.device && a.inode === b.inode
 }
 
-export async function registeredRoot(registry, sessionId) {
-  const bound = registry.list().filter(item => item.sessionIds.includes(sessionId))
-  if (bound.length !== 1) return
-  const { id, path: root } = bound[0]
-  if (!path.isAbsolute(root ?? '')) return
+// Like the DSH session file API, resolve cwd from the live header first and
+// the stored header only when the Session is not loaded. Never use a path
+// supplied by the client, a registry membership, or the profile as a fallback.
+export async function sessionRoot(ctx, sessionId) {
+  const live = ctx.sessions.get(sessionId)?.header
+  const stored = live === undefined ? await ctx.get('sessionPersistence')?.stat(sessionId) : undefined
+  const root = (live ?? stored?.header)?.cwd
+  if (typeof root !== 'string' || !path.isAbsolute(root)) return
   try {
-    const identity = await identify(root, 'directory')
-    if (identity) return { id, ...identity }
-  } catch { /* stale or missing registered directory */ }
+    return await identify(root, 'directory')
+  } catch { /* missing or inaccessible cwd */ }
 }
 
 async function identifyWorkspaceFile(root, parts) {

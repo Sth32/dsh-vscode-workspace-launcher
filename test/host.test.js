@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { apply, createHandlers } from '../src/index.js'
-import { discover } from '../src/workspaces.js'
+import { discover, sessionRoot } from '../src/workspaces.js'
 import { launchVSCode, resolveVSCode } from '../src/vscode.js'
 
 const fn = (kind, body, host = 'localhost:2345') => new Request('http://dsh.internal/api/vscode-workspace/' + kind, {
@@ -21,10 +21,13 @@ async function fixture(t) {
   await mkdir(outside)
   const hits = []
   const registry = { values: [{ id: 'workspace-id', path: root, sessionIds: ['session-here', 'session-other'] }], list() { return this.values } }
+  const cwds = new Map([['session-here', root], ['session-other', root]])
+  const sessionCtx = { sessions: { get: id => cwds.has(id) ? { header: { cwd: cwds.get(id) } } : undefined }, get: () => undefined }
+  const resolveRoot = id => sessionRoot(sessionCtx, id)
   let now = 1000
-  const handlers = createHandlers({ registry, env: {}, now: () => now, resolveEditor: async () => '/trusted/code',
+  const handlers = createHandlers({ resolveRoot, env: {}, now: () => now, resolveEditor: async () => '/trusted/code',
     launch: async (editor, target) => { hits.push({ editor, target }) } })
-  return { dir, root, outside, handlers, hits, registry, advance: () => { now += 120_001 } }
+  return { dir, root, outside, handlers, hits, registry, cwds, resolveRoot, advance: () => { now += 120_001 } }
 }
 const call = async (handlers, kind, body, host) => {
   const response = await handlers[kind](fn(kind, body, host))
@@ -48,7 +51,7 @@ test('finds sorted real workspace files, skips symlinks and ignored directories,
   assert.ok(!JSON.stringify(body).includes(root))
 })
 
-test('opaque IDs are session-scoped, expire, and refuse replacement; parent targets registered root', async t => {
+test('opaque IDs are session-scoped, expire, and refuse replacement; folder action targets the session directory', async t => {
   const { root, handlers, hits, advance } = await fixture(t)
   const file = path.join(root, 'with space & code.code-workspace')
   await writeFile(file, '{}')
@@ -68,16 +71,14 @@ test('opaque IDs are session-scoped, expire, and refuse replacement; parent targ
   assert.equal(hits.length, 2)
 })
 
-test('denies raw paths, remote frontend, unknown session, ambiguous binding and local Host via SSH', async t => {
-  const { handlers, registry, root, hits } = await fixture(t)
+test('denies raw paths, remote frontend, unknown session and local Host via SSH', async t => {
+  const { handlers, resolveRoot, root, hits } = await fixture(t)
   assert.equal((await call(handlers, 'open', { sessionId: 'session-here', path: root })).status, 400)
   assert.equal((await call(handlers, 'open', { sessionId: 'session-here' }, 'https.rebound.test')).status, 403)
   assert.equal((await call(handlers, 'open', { sessionId: 'missing' })).status, 404)
   assert.equal((await call(handlers, 'open', { sessionId: 's'.repeat(1100) })).status, 400)
-  const ssh = createHandlers({ registry, env: { SSH_TTY: '/dev/pts/1' } })
+  const ssh = createHandlers({ resolveRoot, env: { SSH_TTY: '/dev/pts/1' } })
   assert.equal((await call(ssh, 'list', { sessionId: 'session-here' })).status, 403)
-  registry.values.push({ id: 'other', path: root, sessionIds: ['session-here'] })
-  assert.equal((await call(handlers, 'open', { sessionId: 'session-here' })).status, 404)
   assert.deepEqual(hits, [])
 })
 
@@ -130,7 +131,7 @@ test('launch uses one literal argv path, never a shell, and drops Electron boot 
 test('mounts only exact POST owner Connection routes through lifecycle', () => {
   const routes = []
   apply({
-    workspaceRegistry: { list: () => [] },
+    sessions: { get: () => undefined },
     connection: { fetch: { register: route => { routes.push(route); return () => {} } } },
     effect: fn => fn(),
   })
@@ -179,9 +180,9 @@ test('one unreadable directory marks discovery incomplete without hiding readabl
   } finally { await chmod(locked, 0o700) }
 })
 
-test('registered workspace determines discovery regardless of distinct adjacent workspace and rejected cwd field', async t => {
-  const { root, outside, registry, handlers } = await fixture(t)
-  registry.values.push({ id: 'outside-id', path: outside, sessionIds: ['session-outside'] })
+test('each session cwd scopes discovery, regardless of distinct adjacent workspace and rejected cwd field', async t => {
+  const { root, outside, cwds, handlers } = await fixture(t)
+  cwds.set('session-outside', outside)
   await writeFile(path.join(root, 'inside.code-workspace'), '{}')
   await writeFile(path.join(outside, 'outside.code-workspace'), '{}')
   assert.equal((await call(handlers, 'list', { sessionId: 'session-here', cwd: outside })).status, 400)
@@ -203,10 +204,10 @@ test('a queued workspace symlink or Windows junction cannot introduce outside fi
 })
 
 test('listing does not wait for or depend on editor discovery; opening still checks availability', async t => {
-  const { root, registry } = await fixture(t)
+  const { root, resolveRoot } = await fixture(t)
   await writeFile(path.join(root, 'readable.code-workspace'), '{}')
   let lookups = 0
-  const handlers = createHandlers({ registry, env: {}, resolveEditor: async () => { ++lookups } })
+  const handlers = createHandlers({ resolveRoot, env: {}, resolveEditor: async () => { ++lookups } })
   const list = await call(handlers, 'list', { sessionId: 'session-here' })
   assert.equal(list.status, 200)
   assert.equal(list.body.files[0].label, 'readable.code-workspace')
@@ -217,10 +218,10 @@ test('listing does not wait for or depend on editor discovery; opening still che
 })
 
 test('slow post-menu discovery still returns a real root file after the native menu deadline', async t => {
-  const { root, registry } = await fixture(t)
+  const { root, resolveRoot } = await fixture(t)
   await writeFile(path.join(root, 'T00.code-workspace'), '{}')
   const handlers = createHandlers({
-    registry, env: {},
+    resolveRoot, env: {},
     discoverFiles: async (...args) => {
       // Model a busy filesystem at the first scan operation. This exceeds
       // both 0.1.1's Host deadline and DSH's native menu deadline.
@@ -235,7 +236,7 @@ test('slow post-menu discovery still returns a real root file after the native m
 })
 
 test('a dismissed menu scan cannot overwrite a newer listing in the same session', async t => {
-  const { root, registry } = await fixture(t)
+  const { root, resolveRoot } = await fixture(t)
   await writeFile(path.join(root, 'T00.code-workspace'), '{}')
   let finishFirst
   let beginFirst
@@ -243,7 +244,7 @@ test('a dismissed menu scan cannot overwrite a newer listing in the same session
   const started = new Promise(resolve => { beginFirst = resolve })
   let scans = 0
   const handlers = createHandlers({
-    registry, env: {}, resolveEditor: async () => '/trusted/code', launch: async () => {},
+    resolveRoot, env: {}, resolveEditor: async () => '/trusted/code', launch: async () => {},
     discoverFiles: async (...args) => {
       if (++scans === 1) {
         beginFirst()
@@ -272,17 +273,61 @@ test('native schema defaults to depth 2 and only accepts whole depths 0–8', as
 })
 
 test('configured depth is live, root is 0, and intentionally deeper files do not mark results incomplete', async t => {
-  const { root, registry } = await fixture(t)
+  const { root, resolveRoot } = await fixture(t)
   await mkdir(path.join(root, 'one', 'two', 'three'), { recursive: true })
   const labels = ['root.code-workspace','one/one.code-workspace',
     'one/two/two.code-workspace','one/two/three/three.code-workspace']
   for (const label of labels) await writeFile(path.join(root, label), '{}')
   let depth
-  const handlers = createHandlers({ registry, env: {}, getSearchDepth: () => depth })
+  const handlers = createHandlers({ resolveRoot, env: {}, getSearchDepth: () => depth })
   for (const [setting, expected] of [[undefined, 3], [0, 1], [1, 2], [2, 3], [3, 4], [8, 4], [99, 3]]) {
     depth = setting
     const found = (await call(handlers, 'list', { sessionId: 'session-here' })).body
     assert.equal(found.truncated, false)
     assert.deepEqual(found.files.map(file => file.label).sort(), labels.slice(0, expected).sort())
   }
+})
+
+test('the mounted Host uses live then stored session cwd, never an unrelated registered root', async t => {
+  const { root, outside, registry } = await fixture(t)
+  await writeFile(path.join(root, 'wrong-root.code-workspace'), '{}')
+  await writeFile(path.join(outside, 'T00.code-workspace'), '{}')
+  const live = new Map([
+    ['session-here', { header: { cwd: outside } }],
+    ['session-without-cwd', { header: {} }],
+    ['not-absolute', { header: { cwd: '.' } }],
+  ])
+  registry.values[0].sessionIds.push('session-without-cwd')
+  const stored = new Map([
+    ['session-stored', { header: { cwd: outside } }],
+    ['session-without-cwd', { header: { cwd: outside } }],
+  ])
+  const handlers = {}
+  apply({
+    workspaceRegistry: registry,
+    sessions: { get: id => live.get(id) },
+    get: key => key === 'sessionPersistence' ? { stat: async id => stored.get(id) } : undefined,
+    connection: { fetch: { register: item => { handlers[item.path.split('/').at(-1)] = item.fetch; return () => {} } } },
+    effect: init => init(),
+  }, {})
+  for (const id of ['session-here', 'session-stored']) {
+    const found = await call(handlers, 'list', { sessionId: id })
+    assert.equal(found.status, 200)
+    assert.deepEqual(found.body.files.map(file => file.label), ['T00.code-workspace'])
+  }
+  for (const id of ['session-without-cwd', 'not-absolute', 'unknown']) {
+    assert.equal((await call(handlers, 'list', { sessionId: id })).status, 404)
+  }
+})
+
+test('changing a live session cwd invalidates already-listed file IDs', async t => {
+  const { root, outside, handlers, hits, cwds } = await fixture(t)
+  await writeFile(path.join(root, 'T00.code-workspace'), '{}')
+  await writeFile(path.join(outside, 'T00.code-workspace'), '{}')
+  const sessionId = 'session-here'
+  const listed = await call(handlers, 'list', { sessionId })
+  cwds.set(sessionId, outside)
+  assert.deepEqual(await call(handlers, 'open', { sessionId, fileId: listed.body.files[0].id }),
+    { status: 409, body: { code: 'file-unavailable' } })
+  assert.deepEqual(hits, [])
 })
