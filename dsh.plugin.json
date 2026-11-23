@@ -1,8 +1,8 @@
 {
   "id": "dsh-external/dsh-vscode-workspace-launcher",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Open VS Code workspace files from the session header menu.",
   "main": "./src/index.js",
-  "engines": { "dsh": ">=0.2.2-rc.5 <=0.2.2" },
+  "engines": { "dsh": ">=0.2.2-rc.5 <0.3.0-0" },
   "contributes": { "tools": [], "skills": [] }
 }

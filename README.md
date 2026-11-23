@@ -8,7 +8,7 @@
 
 ## 安装
 
-用 DSH 0.2.2-rc.5、Node.js 24.9.0+。桌面端在「插件 → 添加插件」填写 `github:Sth32/dsh-vscode-workspace-launcher`，安装后启用并按提示重启。Web 可运行：
+此插件允许安装在 DSH 0.2.2-rc.5 至 0.2.x（包括测试版）；未来版本允许尝试安装，不代表已验证。0.3.0 测试版及以上需另行适配。Node.js 需满足 DSH 宿主要求。桌面端在「插件 → 添加插件」填写 `github:Sth32/dsh-vscode-workspace-launcher`，安装后启用并按提示重启。Web 可运行：
 
 ```sh
 dsh plugin --profile web add github:Sth32/dsh-vscode-workspace-launcher
@@ -17,7 +17,7 @@ dsh plugin --profile web add github:Sth32/dsh-vscode-workspace-launcher
 如需从本地包安装，先在源码目录执行 `npm pack`，再运行：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.3.tgz
+dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.4.tgz
 ```
 
 如果已安装旧版，使用插件管理器的更新入口（如有）并指定要安装的 Git 引用，不要把同一个仓库 URL 当成升级操作重复提交。如果出现「无法从依赖变更中确定安装了哪一个包」，用带完整提交 SHA 的地址 `github:Sth32/dsh-vscode-workspace-launcher#<SHA>` 安装；若 DSH 仍拒绝替换，在插件管理里移除旧插件包再用该地址安装，并先记下自定义搜索深度。
@@ -27,6 +27,10 @@ dsh plugin --profile web add /absolute/path/dsh-vscode-workspace-launcher-0.1.3.
 ## 范围
 
 与 DSH 原生「在应用中打开」使用同一个会话工作目录，不依赖工作区分组或注册；只扫描该目录，从根目录逐层扫描至配置深度，最多 4,000 个条目或 100 个结果；跳过 Git、node_modules 及符号链接。扫描被截断时菜单会提示。不会读取工作区文件内容或改变 DSH 工作区、权限、会话、首选编辑器；VS Code 自行处理工作区文件内容和 Workspace Trust。宿主必须在本机运行，并由 DSH 的所有者连接授权；不支持 SSH 模式或远程浏览器访问。请只打开可信的工作区文件。
+
+## 0.1.4
+
+- 放宽 0.2.x 内的安装范围，不再因新的补丁版或预览版默认拒绝加载。
 
 ## 0.1.3
 
